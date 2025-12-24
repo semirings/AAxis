@@ -318,6 +318,353 @@ def build_table_from_triples(aa: dict, mats) -> float:
 
     return max(width, height, 1.0)
 
+import bpy
+import math
+
+def _depsgraph_update():
+    # In background mode, this is usually enough.
+    dg = bpy.context.evaluated_depsgraph_get()
+    dg.update()
+
+def measure_text_dimensions(
+    body: str,
+    size: float,
+    *,
+    rotation_z_rad: float = 0.0,
+    font: bpy.types.VectorFont | None = None,
+    extrude: float = 0.0,
+) -> tuple[float, float]:
+    """
+    Returns (width, height) in Blender world units for a Text object.
+
+    We create a temporary text object, update depsgraph, read obj.dimensions,
+    then delete it. This is robust in -b mode.
+    """
+    scene = bpy.context.scene
+    root = scene.collection
+
+    bpy.ops.object.text_add(location=(0.0, 0.0, 0.0))
+    obj = bpy.context.object
+    obj.hide_render = True
+    obj.hide_viewport = True
+
+    obj.data.body = "" if body is None else str(body)
+    obj.data.size = float(size)
+    obj.data.extrude = float(extrude)
+    obj.rotation_euler = (0.0, 0.0, float(rotation_z_rad))
+
+    if font is not None:
+        obj.data.font = font
+
+    # Link explicitly (background-safe) and update
+    if obj.name not in root.objects:
+        root.objects.link(obj)
+
+    _depsgraph_update()
+
+    # dimensions includes rotation effect (bounding box in world axes)
+    w = float(obj.dimensions.x)
+    h = float(obj.dimensions.y)
+
+    # Cleanup
+    bpy.data.objects.remove(obj, do_unlink=True)
+
+    # Guard: empty strings can sometimes measure ~0
+    return max(w, 0.001), max(h, 0.001)
+
+def default_cell_style():
+    """
+    Returns a dict of layout style knobs.
+    Tune these without touching layout logic.
+    """
+    return {
+        "pad_x": 0.20,      # horizontal padding added to measured text width
+        "pad_y": 0.20,      # vertical padding added to measured text height
+        "min_w": 0.60,      # minimum cell width
+        "min_h": 0.45,      # minimum cell height
+        "gap_x": 0.00,      # optional gap between columns
+        "gap_y": 0.00,      # optional gap between rows
+    }
+
+def compute_table_layout(
+    *,
+    row_headers: list[str],                 # length R
+    col_headers: list[str],                 # length C
+    cell_text: dict[tuple[int, int], str],  # keys (r,c) where r in [0..R-1], c in [0..C-1]
+    sizes: dict,
+    style: dict,
+    col_header_rot_z: float = math.radians(45.0),
+    font: bpy.types.VectorFont | None = None,
+) -> tuple[list[float], list[float]]:
+    """
+    Returns (col_widths, row_heights) for a table with:
+      - header row (col_headers) and header col (row_headers)
+      - value region cell_text
+
+    We compute:
+      col_widths[0] for the row-header column
+      col_widths[c+1] for value columns
+      row_heights[0] for the col-header row
+      row_heights[r+1] for value rows
+
+    sizes = {
+      "row_header": 0.25,
+      "col_header": 0.25,
+      "value": 0.22
+    }
+    """
+    R = len(row_headers)
+    C = len(col_headers)
+
+    pad_x = style["pad_x"]
+    pad_y = style["pad_y"]
+    min_w = style["min_w"]
+    min_h = style["min_h"]
+
+    # 0th col is row headers; cols 1..C are value columns
+    col_widths = [min_w] * (C + 1)
+    # 0th row is col headers; rows 1..R are value rows
+    row_heights = [min_h] * (R + 1)
+
+    # --- measure column headers (affects row 0 height and each value column width) ---
+    for c, label in enumerate(col_headers):
+        w, h = measure_text_dimensions(
+            label,
+            sizes["col_header"],
+            rotation_z_rad=col_header_rot_z,
+            font=font,
+        )
+        col_widths[c + 1] = max(col_widths[c + 1], w + pad_x * 2, min_w)
+        row_heights[0] = max(row_heights[0], h + pad_y * 2, min_h)
+
+    # --- measure row headers (affects col 0 width and each value row height) ---
+    for r, label in enumerate(row_headers):
+        w, h = measure_text_dimensions(
+            label,
+            sizes["row_header"],
+            rotation_z_rad=0.0,
+            font=font,
+        )
+        col_widths[0] = max(col_widths[0], w + pad_x * 2, min_w)
+        row_heights[r + 1] = max(row_heights[r + 1], h + pad_y * 2, min_h)
+
+    # --- measure value cells (affects both their row height and column width) ---
+    for (r, c), body in cell_text.items():
+        w, h = measure_text_dimensions(
+            body,
+            sizes["value"],
+            rotation_z_rad=0.0,
+            font=font,
+        )
+        col_widths[c + 1] = max(col_widths[c + 1], w + pad_x * 2, min_w)
+        row_heights[r + 1] = max(row_heights[r + 1], h + pad_y * 2, min_h)
+
+    return col_widths, row_heights
+
+def cumulative_edges(lengths: list[float], gap: float = 0.0) -> list[float]:
+    """
+    For lengths [L0, L1, ...], returns edges [0, e1, e2, ...] where
+    each step adds length + gap.
+
+    edges[i] is the start edge of cell i.
+    edges[i+1] is the end edge of cell i.
+    """
+    edges = [0.0]
+    cur = 0.0
+    for L in lengths:
+        cur += float(L)
+        edges.append(cur)
+        cur += float(gap)
+    return edges
+
+def cell_center(edges: list[float], i: int) -> float:
+    return (edges[i] + edges[i + 1]) * 0.5
+
+def total_span(edges: list[float]) -> float:
+    return edges[-1]
+
+def add_cell_plane(
+    parent,
+    *,
+    cx: float,
+    cy: float,
+    w: float,
+    h: float,
+    mat,
+    name: str,
+):
+    """
+    Adds a plane of width w and height h centered at (cx,cy).
+    Blender's primitive plane uses a square "size" (half-dimension scaling),
+    so we create unit plane and scale it.
+    """
+    bpy.ops.mesh.primitive_plane_add(size=1.0, location=(cx, cy, 0.0))
+    obj = bpy.context.object
+    obj.name = name
+    obj.parent = parent
+
+    # unit plane is 2x2 when size=1.0? Actually size is radius, so plane ends up 2x2.
+    # scaling by (w/2, h/2) yields final w x h.
+    obj.scale = (w / 2.0, h / 2.0, 1.0)
+
+    if obj.data.materials:
+        obj.data.materials[0] = mat
+    else:
+        obj.data.materials.append(mat)
+
+    return obj
+
+def add_text_object(
+    parent,
+    *,
+    body: str,
+    cx: float,
+    cy: float,
+    z: float,
+    size: float,
+    mat,
+    rot_z: float = 0.0,
+    font: bpy.types.VectorFont | None = None,
+):
+    bpy.ops.object.text_add(location=(cx, cy, z))
+    obj = bpy.context.object
+    obj.parent = parent
+
+    obj.data.body = "" if body is None else str(body)
+    obj.data.size = float(size)
+    obj.data.align_x = "CENTER"
+    obj.data.align_y = "CENTER"
+    obj.rotation_euler = (0.0, 0.0, float(rot_z))
+
+    if font is not None:
+        obj.data.font = font
+
+    if obj.data.materials:
+        obj.data.materials[0] = mat
+    else:
+        obj.data.materials.append(mat)
+
+    return obj
+
+def build_variable_cell_table(
+    *,
+    parent,
+    row_headers: list[str],
+    col_headers: list[str],
+    cell_text: dict[tuple[int, int], str],
+    mats: dict,
+    sizes: dict,
+    style: dict | None = None,
+    col_header_rot_z: float = math.radians(45.0),
+    font: bpy.types.VectorFont | None = None,
+    text_z: float = 0.01,
+):
+    if style is None:
+        style = default_cell_style()
+
+    # 1) compute per-row/per-col sizes
+    col_widths, row_heights = compute_table_layout(
+        row_headers=row_headers,
+        col_headers=col_headers,
+        cell_text=cell_text,
+        sizes=sizes,
+        style=style,
+        col_header_rot_z=col_header_rot_z,
+        font=font,
+    )
+
+    # 2) compute edges
+    x_edges = cumulative_edges(col_widths, gap=style["gap_x"])
+    y_edges = cumulative_edges(row_heights, gap=style["gap_y"])
+
+    # We want y increasing upward, but our table rows go downward.
+    # We'll build with y=0 at top edge, then subtract.
+    total_w = total_span(x_edges)
+    total_h = total_span(y_edges)
+
+    # Center table around origin
+    x0 = -total_w / 2.0
+    y0 = +total_h / 2.0
+
+    # 3) planes (skip upper-left)
+    R = len(row_headers)
+    C = len(col_headers)
+
+    for r in range(R + 1):       # includes header row 0
+        for c in range(C + 1):   # includes header col 0
+            if r == 0 and c == 0:
+                continue
+
+            w = col_widths[c]
+            h = row_heights[r]
+            cx = x0 + cell_center(x_edges, c)
+            cy = y0 - cell_center(y_edges, r)
+
+            is_header = (r == 0 or c == 0)
+            mat = mats["head_bg"] if is_header else mats["cell_bg"]
+            add_cell_plane(
+                parent,
+                cx=cx, cy=cy,
+                w=w, h=h,
+                mat=mat,
+                name=f"cell_r{r}_c{c}",
+            )
+
+    # 4) header text
+    # Column headers: row 0, col 1..C
+    for c in range(1, C + 1):
+        cx = x0 + cell_center(x_edges, c)
+        cy = y0 - cell_center(y_edges, 0)
+        add_text_object(
+            parent,
+            body=col_headers[c - 1],
+            cx=cx, cy=cy, z=text_z,
+            size=sizes["col_header"],
+            mat=mats["col_fg"],
+            rot_z=col_header_rot_z,
+            font=font,
+        )
+
+    # Row headers: col 0, row 1..R
+    for r in range(1, R + 1):
+        cx = x0 + cell_center(x_edges, 0)
+        cy = y0 - cell_center(y_edges, r)
+        add_text_object(
+            parent,
+            body=row_headers[r - 1],
+            cx=cx, cy=cy, z=text_z,
+            size=sizes["row_header"],
+            mat=mats["row_fg"],
+            rot_z=0.0,
+            font=font,
+        )
+
+    # 5) value text: (r,c) in value region maps to (r+1,c+1) in full grid
+    for (vr, vc), body in cell_text.items():
+        r = vr + 1
+        c = vc + 1
+        cx = x0 + cell_center(x_edges, c)
+        cy = y0 - cell_center(y_edges, r)
+        add_text_object(
+            parent,
+            body=body,
+            cx=cx, cy=cy, z=text_z,
+            size=sizes["value"],
+            mat=mats["val_fg"],
+            rot_z=0.0,
+            font=font,
+        )
+
+    return {
+        "col_widths": col_widths,
+        "row_heights": row_heights,
+        "total_w": total_w,
+        "total_h": total_h,
+        "x_edges": x_edges,
+        "y_edges": y_edges,
+    }
+
+
 
 # ------------------------------------------------------------
 # World / Camera / Output
@@ -358,8 +705,22 @@ def main():
     setup_world()
 
     mats = ensure_five_materials()
-    aa = load_aa(aa_path)
+    sizes = {
+    "row_header": 0.25,
+    "col_header": 0.25,
+    "value": 0.22,
+    }
 
+    aa = load_aa(aa_path)
+    
+    layout_info = build_variable_cell_table(
+        parent=parent_empty,
+        row_headers=row_headers,
+        col_headers=col_headers,
+        cell_text=cell_text,
+        mats=mats,
+        sizes=sizes,
+    )
     span = build_table_from_triples(aa, mats)
     setup_camera(span)
     save_blend(out_path)
