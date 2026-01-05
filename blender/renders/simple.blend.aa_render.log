@@ -1,0 +1,5 @@
+[AA_RENDER] DIAGNOSTICS
+[AA_RENDER] sys.argv = ['/Applications/Blender.app/Contents/MacOS/Blender', '-b', '-P', '/Users/gcr/ingis.Wk/AAxis/scripts/aa_render_grid.py', '--', '--aa', 'data/fixtures/aa/simple_grid.json', '--out', 'blender/renders/simple.blend']
+[AA_RENDER] aa_path  = data/fixtures/aa/simple_grid.json
+[AA_RENDER] out_path = blender/renders/simple.blend
+[AA_RENDER] cwd      = /Users/gcr/ingis.Wk/AAxis

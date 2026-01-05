@@ -1,474 +1,341 @@
 #!/usr/bin/env python3
-from __future__ import annotations
+"""
+aa_render_grid.py  (DROP-IN)
+
+Blender CLI usage:
+  blender -b -P scripts/aa_render_grid.py -- --aa path/to/AA_JSON.json --out out.blend
+  blender -b -P scripts/aa_render_grid.py -- --aa path/to/AA_JSON.json --out out.png
+
+Input formats supported:
+1) Dense "easy" AA_JSON:
+   {"rows":[...], "cols":[...], "vals":[R*C]}   (row-major by default)
+
+2) Triples-list AA_JSON (recommended for canonical handoff):
+   {"format":"triples","triples":[[row,col,val], ...]}
+
+3) Parallel triples arrays:
+   {"rows":[...], "cols":[...], "vals":[...]} where len(rows)==len(cols)==len(vals)
+"""
 
 import sys
-import json
-import os
 import argparse
+import json
 import math
+from pathlib import Path
+from typing import Any, Dict, List, Tuple, Optional
+
 import bpy
 
 
-# ------------------------------------------------------------
-# Logging
-# ------------------------------------------------------------
+# -------------------------
+# Scene helpers
+# -------------------------
 
-def log(msg: str):
-    print(msg)
-    try:
-        sys.stdout.flush()
-    except Exception:
-        pass
+def clear_scene_aggressive() -> None:
+    """Nuclear option: clear everything. Good for batch generation."""
+    bpy.ops.wm.read_factory_settings(use_empty=True)
 
+def ensure_collection(name: str) -> bpy.types.Collection:
+    col = bpy.data.collections.get(name)
+    if col is None:
+        col = bpy.data.collections.new(name)
+        bpy.context.scene.collection.children.link(col)
+    return col
 
-# ------------------------------------------------------------
-# Args (matches render_aa.sh)
-# ------------------------------------------------------------
+def new_empty(name: str, collection: bpy.types.Collection) -> bpy.types.Object:
+    empty = bpy.data.objects.new(name, None)
+    empty.empty_display_type = "PLAIN_AXES"
+    empty.empty_display_size = 0.5
+    collection.objects.link(empty)
+    return empty
 
-def parse_args() -> tuple[str, str]:
-    argv = sys.argv
-    user_argv = []
-    if "--" in argv:
-        user_argv = argv[argv.index("--") + 1 :]
-
-    p = argparse.ArgumentParser(add_help=False)
-    p.add_argument("--aa")
-    p.add_argument("--out")
-    ns, extras = p.parse_known_args(user_argv)
-
-    if ns.aa and ns.out:
-        return ns.aa, ns.out
-    if len(extras) >= 2:
-        return extras[0], extras[1]
-
-    raise RuntimeError("Expected: --aa <aa.json> --out <output.blend>")
+def _depsgraph_update():
+    bpy.context.evaluated_depsgraph_get().update()
+    bpy.context.view_layer.update()
 
 
-# ------------------------------------------------------------
-# Scene utilities
-# ------------------------------------------------------------
+# -------------------------
+# Materials (5 requested)
+# -------------------------
 
-def clear_scene():
-    bpy.ops.object.select_all(action="SELECT")
-    bpy.ops.object.delete(use_global=False)
+def ensure_material(name: str, rgba: Tuple[float, float, float, float]) -> bpy.types.Material:
+    mat = bpy.data.materials.get(name)
+    if mat is None:
+        mat = bpy.data.materials.new(name=name)
 
-    for block in (
-        bpy.data.meshes,
-        bpy.data.materials,
-        bpy.data.objects,
-        bpy.data.collections,
-        bpy.data.curves,
-        bpy.data.fonts,
-    ):
-        for b in list(block):
-            try:
-                block.remove(b)
-            except Exception:
-                pass
-
-
-def load_aa(path: str) -> dict:
-    with open(path, "r") as f:
-        return json.load(f)
-
-
-# ------------------------------------------------------------
-# Materials (exactly 5)
-# ------------------------------------------------------------
-
-def _make_material(name: str, rgba: tuple[float, float, float, float]):
-    mat = bpy.data.materials.new(name)
+    # Render color (nodes)
     mat.use_nodes = True
-    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    nt = mat.node_tree
+    nodes = nt.nodes
+    links = nt.links
+
+    for n in list(nodes):
+        nodes.remove(n)
+
+    out = nodes.new("ShaderNodeOutputMaterial")
+    bsdf = nodes.new("ShaderNodeBsdfPrincipled")
+    out.location = (300, 0)
+    bsdf.location = (0, 0)
+    links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+
     bsdf.inputs["Base Color"].default_value = rgba
     bsdf.inputs["Roughness"].default_value = 0.85
+
+    # Viewport color (Solid mode often uses diffuse_color)
+    mat.diffuse_color = rgba
     return mat
 
-
-def ensure_five_materials():
-    # 1 head_bg dark grey
-    head_bg = bpy.data.materials.get("head_bg") or _make_material("head_bg", (0.20, 0.20, 0.20, 1.0))
-    # 2 cell_bg light grey
-    cell_bg = bpy.data.materials.get("cell_bg") or _make_material("cell_bg", (0.75, 0.75, 0.75, 1.0))
-    # 3 row_fg pink
-    row_fg = bpy.data.materials.get("row_fg") or _make_material("row_fg", (1.00, 0.35, 0.70, 1.0))
-    # 4 col_fg cyan
-    col_fg = bpy.data.materials.get("col_fg") or _make_material("col_fg", (0.25, 0.95, 1.00, 1.0))
-    # 5 val_fg yellow
-    val_fg = bpy.data.materials.get("val_fg") or _make_material("val_fg", (1.00, 0.95, 0.20, 1.0))
-
+def ensure_aa_materials() -> Dict[str, bpy.types.Material]:
     return {
-        "head_bg": head_bg,
-        "cell_bg": cell_bg,
-        "row_fg": row_fg,
-        "col_fg": col_fg,
-        "val_fg": val_fg,
+        "head_bg": ensure_material("head_bg", (0.18, 0.18, 0.18, 1.0)),
+        "cell_bg": ensure_material("cell_bg", (0.72, 0.72, 0.72, 1.0)),
+        "row_fg":  ensure_material("row_fg",  (1.00, 0.35, 0.65, 1.0)),
+        "col_fg":  ensure_material("col_fg",  (0.25, 0.95, 0.95, 1.0)),
+        "val_fg":  ensure_material("val_fg",  (1.00, 0.95, 0.20, 1.0)),
     }
 
-
-# ------------------------------------------------------------
-# Text helpers
-# ------------------------------------------------------------
-
-def add_text(
-    parent,
-    body: str,
-    x: float,
-    y: float,
-    z: float,
-    size: float,
-    max_width: float,
-    mat,
-    rot_z: float = 0.0,
-):
-    bpy.ops.object.text_add(location=(x, y, z))
-    obj = bpy.context.object
-    obj.parent = parent
-
-    obj.data.body = str(body)
-    obj.data.align_x = "CENTER"
-    obj.data.align_y = "CENTER"
-    obj.data.size = size
-    obj.rotation_euler = (0.0, 0.0, rot_z)
-
-    if obj.data.materials:
-        obj.data.materials[0] = mat
+def hex_to_rgba(hex_color: str) -> tuple[float, float, float, float]:
+    """
+    Convert #RRGGBB or #RRGGBBAA to Blender RGBA floats.
+    """
+    hex_color = hex_color.lstrip("#")
+    if len(hex_color) == 6:
+        r, g, b = hex_color[0:2], hex_color[2:4], hex_color[4:6]
+        a = "FF"
+    elif len(hex_color) == 8:
+        r, g, b, a = (
+            hex_color[0:2],
+            hex_color[2:4],
+            hex_color[4:6],
+            hex_color[6:8],
+        )
     else:
-        obj.data.materials.append(mat)
+        raise ValueError(f"Invalid hex color: #{hex_color}")
 
-    # crude width fit
-    est = max(1, len(obj.data.body)) * size * 0.6
-    if est > max_width:
-        s = max_width / est
-        obj.scale = (s, s, s)
+    return (
+        int(r, 16) / 255.0,
+        int(g, 16) / 255.0,
+        int(b, 16) / 255.0,
+        int(a, 16) / 255.0,
+    )
+
+
+# -------------------------
+# Text measure + creation
+# -------------------------
+
+def add_text_object(
+    collection: bpy.types.Collection,
+    parent: Optional[bpy.types.Object],
+    *,
+    name: str,
+    body: str,
+    location: Tuple[float, float, float],
+    size: float,
+    material: Optional[bpy.types.Material],
+    rot_z: float = 0.0,
+    align_x: str = "CENTER",
+    align_y: str = "CENTER",
+) -> bpy.types.Object:
+    curve = bpy.data.curves.new(name=f"{name}_curve", type="FONT")
+    curve.body = "" if body is None else str(body)
+    curve.size = float(size)
+    curve.align_x = align_x
+    curve.align_y = align_y
+
+    obj = bpy.data.objects.new(name, curve)
+    obj.location = location
+    obj.rotation_euler = (0.0, 0.0, float(rot_z))
+
+    if material:
+        if obj.data.materials:
+            obj.data.materials[0] = material
+        else:
+            obj.data.materials.append(material)
+
+    collection.objects.link(obj)
+    if parent:
+        obj.parent = parent
+    return obj
+
+def measure_text_dimensions(body: str, size: float, rot_z: float = 0.0) -> Tuple[float, float]:
+    """
+    Measure text bounds in world units by instantiating a temp FONT object.
+    Safe in -b mode.
+    """
+    tmp_col = ensure_collection("_AA_TMP_MEASURE")
+    t = add_text_object(
+        tmp_col, None,
+        name="_tmp",
+        body=body,
+        location=(0.0, 0.0, 0.0),
+        size=size,
+        material=None,
+        rot_z=rot_z,
+        align_x="LEFT",
+        align_y="BOTTOM",
+    )
+    _depsgraph_update()
+    w = max(float(t.dimensions.x), 0.001)
+    h = max(float(t.dimensions.y), 0.001)
+    bpy.data.objects.remove(t, do_unlink=True)
+    return w, h
+
+
+# -------------------------
+# Geometry helpers
+# -------------------------
+
+def add_cell_plane(
+    collection: bpy.types.Collection,
+    parent: Optional[bpy.types.Object],
+    *,
+    name: str,
+    cx: float,
+    cy: float,
+    z: float,
+    w: float,
+    h: float,
+    material: Optional[bpy.types.Material],
+) -> bpy.types.Object:
+    bpy.ops.mesh.primitive_plane_add(size=1.0, location=(cx, cy, z))
+    obj = bpy.context.object
+    obj.name = name
+
+    _depsgraph_update()
+    dx, dy, _ = obj.dimensions
+    if dx <= 0.0: dx = 2.0
+    if dy <= 0.0: dy = 2.0
+    obj.scale.x *= (w / dx)
+    obj.scale.y *= (h / dy)
+
+    if material:
+        if obj.data.materials:
+            obj.data.materials[0] = material
+        else:
+            obj.data.materials.append(material)
+
+    if parent:
+        obj.parent = parent
+
+    # Ensure it lives in our collection
+    if obj.name not in collection.objects:
+        collection.objects.link(obj)
 
     return obj
 
 
-def stringify_val(v) -> str:
-    # D4M Assoc assumes no explicit nulls and deletes them, but
-    # your JSON may contain them; show them rather than dropping.
-    if v is None:
-        return "null"
-    if isinstance(v, str):
-        return v
-    try:
-        return str(v)
-    except Exception:
-        return "null"
+# -------------------------
+# AA parsing -> cell_text
+# -------------------------
 
+def _stable_unique(seq: List[str]) -> List[str]:
+    seen = set()
+    out = []
+    for x in seq:
+        if x not in seen:
+            out.append(x)
+            seen.add(x)
+    return out
 
-# ------------------------------------------------------------
-# Triple aggregation (D4M-like, but simple)
-# ------------------------------------------------------------
-
-def aggregate_cell(existing: str, new: str, mode: str) -> str:
+def aa_to_triples(aa: Dict[str, Any], *, layout: str = "row-major", keep_empty: bool = False) -> List[Tuple[str, str, str]]:
     """
-    If multiple triples land in the same (row,col), decide what to show.
-    - 'last': keep last
-    - 'first': keep first
-    - 'stack': show all, one per line
-    - 'min'/'max': try numeric compare, fallback to lexical
+    Returns triples list (row_label, col_label, value_str).
+    Supports:
+      - {"format":"triples","triples":[[r,c,v],...]}
+      - dense rows/cols/vals where len(vals)=R*C
+      - parallel triples arrays where len(rows)=len(cols)=len(vals)
     """
-    if existing is None:
-        return new
+    empties = ("", None)
 
-    if mode == "first":
-        return existing
-    if mode == "last":
-        return new
-    if mode == "stack":
-        return existing + "\n" + new
+    def keep(v: Any) -> bool:
+        return keep_empty or (v not in empties)
 
-    if mode in ("min", "max"):
-        # try numeric
-        try:
-            a = float(existing)
-            b = float(new)
-            return str(min(a, b) if mode == "min" else max(a, b))
-        except Exception:
-            return min(existing, new) if mode == "min" else max(existing, new)
+    # format=triples
+    if aa.get("format") == "triples" and isinstance(aa.get("triples"), list):
+        out = []
+        for t in aa["triples"]:
+            if not (isinstance(t, (list, tuple)) and len(t) == 3):
+                continue
+            r, c, v = t
+            if keep(v):
+                out.append((str(r), str(c), str(v)))
+        return out
 
-    # default
-    return new
-
-
-# ------------------------------------------------------------
-# Build table with headers + vals (from triples)
-# ------------------------------------------------------------
-
-def build_table_from_triples(aa: dict, mats) -> float:
-    rows = aa.get("rows", [])
-    cols = aa.get("cols", [])
+    rows = [str(x) for x in aa.get("rows", [])]
+    cols = [str(x) for x in aa.get("cols", [])]
     vals = aa.get("vals", [])
 
-    # Most JSON produced from triples should satisfy equal lengths.
-    # But we still guard and use the common prefix.
-    n = min(len(rows), len(cols), len(vals))
-    rows = rows[:n]
-    cols = cols[:n]
-    vals = vals[:n]
+    if not rows or not cols:
+        raise ValueError("AA JSON must contain non-empty 'rows' and 'cols' (or format=triples).")
 
-    if n == 0:
-        raise ValueError("AA has no triples to render (rows/cols/vals empty).")
+    if not isinstance(vals, list):
+        raise ValueError("'vals' must be a list (dense or parallel triples arrays).")
 
-    # Preserve first-seen order for headers
-    unique_rows = list(dict.fromkeys(rows))
-    unique_cols = list(dict.fromkeys(cols))
+    R, C, V = len(rows), len(cols), len(vals)
+    out: List[Tuple[str, str, str]] = []
 
-    row_index = {r: i for i, r in enumerate(unique_rows)}
-    col_index = {c: i for i, c in enumerate(unique_cols)}
+    # dense
+    if V == R * C and not (R == C == V):
+        if layout not in ("row-major", "col-major"):
+            raise ValueError("layout must be 'row-major' or 'col-major'")
+        for ri in range(R):
+            for ci in range(C):
+                idx = (ri * C + ci) if layout == "row-major" else (ci * R + ri)
+                v = vals[idx]
+                if keep(v):
+                    out.append((rows[ri], cols[ci], str(v)))
+        return out
 
-    scene = bpy.context.scene
-    root = scene.collection  # background-safe
-
-    parent = bpy.data.objects.new("AA_Table", None)
-    root.objects.link(parent)
-
-    # Layout params
-    cell_size = 1.0
-    text_z = 0.01
-    header_text_size = 0.25
-    value_text_size = 0.22
-    max_text_width = cell_size * 0.9
-
-    # Header band
-    n_rows = len(unique_rows) + 1
-    n_cols = len(unique_cols) + 1
-
-    # Create planes
-    for r in range(n_rows):
-        for c in range(n_cols):
-            if r == 0 and c == 0:
-                continue  # omit upper-left
-            bpy.ops.mesh.primitive_plane_add(size=cell_size)
-            cell = bpy.context.object
-            cell.parent = parent
-            cell.location = (c * cell_size, -r * cell_size, 0.0)
-            if r == 0 or c == 0:
-                cell.data.materials.append(mats["head_bg"])
-            else:
-                cell.data.materials.append(mats["cell_bg"])
-
-    # Headers
-    rot45 = math.radians(45.0)
-
-    for c_idx, c_lab in enumerate(unique_cols, start=1):
-        add_text(
-            parent,
-            c_lab,
-            x=c_idx * cell_size,
-            y=0.0,
-            z=text_z,
-            size=header_text_size,
-            max_width=max_text_width,
-            mat=mats["col_fg"],
-            rot_z=rot45,
-        )
-
-    for r_idx, r_lab in enumerate(unique_rows, start=1):
-        add_text(
-            parent,
-            r_lab,
-            x=0.0,
-            y=-r_idx * cell_size,
-            z=text_z,
-            size=header_text_size,
-            max_width=max_text_width,
-            mat=mats["row_fg"],
-            rot_z=0.0,
-        )
-
-    # Values: render every triple; aggregate collisions
-    # D4M default aggregate is min, but for visualization "last" is often nicer.
-    AGG_MODE = "last"  # change to: 'min', 'max', 'first', 'stack', 'last'
-
-    cell_text: dict[tuple[int, int], str] = {}
-
+    # parallel triples arrays
+    n = min(R, C, V)
     for i in range(n):
-        r_lab = rows[i]
-        c_lab = cols[i]
-        v_str = stringify_val(vals[i])
+        v = vals[i]
+        if keep(v):
+            out.append((rows[i], cols[i], str(v)))
+    return out
 
-        # +1 for header band offsets
-        r_cell = row_index[r_lab] + 1
-        c_cell = col_index[c_lab] + 1
-
-        key = (r_cell, c_cell)
-        prev = cell_text.get(key)
-        cell_text[key] = aggregate_cell(prev, v_str, AGG_MODE)
-
-    for (r_cell, c_cell), body in cell_text.items():
-        add_text(
-            parent,
-            body,
-            x=c_cell * cell_size,
-            y=-r_cell * cell_size,
-            z=text_z,
-            size=value_text_size,
-            max_width=max_text_width,
-            mat=mats["val_fg"],
-            rot_z=0.0,
-        )
-
-    # Center around origin
-    width = (n_cols - 1) * cell_size
-    height = (n_rows - 1) * cell_size
-    parent.location = (-width / 2.0, height / 2.0, 0.0)
-
-    return max(width, height, 1.0)
-
-import bpy
-import math
-
-def _depsgraph_update():
-    # In background mode, this is usually enough.
-    dg = bpy.context.evaluated_depsgraph_get()
-    dg.update()
-
-def measure_text_dimensions(
-    body: str,
-    size: float,
+def triples_to_headers_and_cells(
+    triples: List[Tuple[str, str, str]],
     *,
-    rotation_z_rad: float = 0.0,
-    font: bpy.types.VectorFont | None = None,
-    extrude: float = 0.0,
-) -> tuple[float, float]:
+    aggregate: str = "last",
+) -> Tuple[List[str], List[str], Dict[Tuple[int, int], str]]:
     """
-    Returns (width, height) in Blender world units for a Text object.
-
-    We create a temporary text object, update depsgraph, read obj.dimensions,
-    then delete it. This is robust in -b mode.
+    Returns:
+      row_headers: unique rows in first-seen order
+      col_headers: unique cols in first-seen order
+      cell_text: dict[(r_idx,c_idx)] = text
     """
-    scene = bpy.context.scene
-    root = scene.collection
+    rows = _stable_unique([r for r, _, _ in triples])
+    cols = _stable_unique([c for _, c, _ in triples])
 
-    bpy.ops.object.text_add(location=(0.0, 0.0, 0.0))
-    obj = bpy.context.object
-    obj.hide_render = True
-    obj.hide_viewport = True
+    r_index = {r: i for i, r in enumerate(rows)}
+    c_index = {c: i for i, c in enumerate(cols)}
 
-    obj.data.body = "" if body is None else str(body)
-    obj.data.size = float(size)
-    obj.data.extrude = float(extrude)
-    obj.rotation_euler = (0.0, 0.0, float(rotation_z_rad))
+    cell_text: Dict[Tuple[int, int], str] = {}
 
-    if font is not None:
-        obj.data.font = font
+    def agg(old: Optional[str], new: str) -> str:
+        if old is None:
+            return new
+        if aggregate == "first":
+            return old
+        if aggregate == "stack":
+            return old + "\n" + new
+        # "last" default
+        return new
 
-    # Link explicitly (background-safe) and update
-    if obj.name not in root.objects:
-        root.objects.link(obj)
+    for r, c, v in triples:
+        key = (r_index[r], c_index[c])
+        cell_text[key] = agg(cell_text.get(key), v)
 
-    _depsgraph_update()
+    return rows, cols, cell_text
 
-    # dimensions includes rotation effect (bounding box in world axes)
-    w = float(obj.dimensions.x)
-    h = float(obj.dimensions.y)
 
-    # Cleanup
-    bpy.data.objects.remove(obj, do_unlink=True)
+# -------------------------
+# Variable layout
+# -------------------------
 
-    # Guard: empty strings can sometimes measure ~0
-    return max(w, 0.001), max(h, 0.001)
-
-def default_cell_style():
-    """
-    Returns a dict of layout style knobs.
-    Tune these without touching layout logic.
-    """
-    return {
-        "pad_x": 0.20,      # horizontal padding added to measured text width
-        "pad_y": 0.20,      # vertical padding added to measured text height
-        "min_w": 0.60,      # minimum cell width
-        "min_h": 0.45,      # minimum cell height
-        "gap_x": 0.00,      # optional gap between columns
-        "gap_y": 0.00,      # optional gap between rows
-    }
-
-def compute_table_layout(
-    *,
-    row_headers: list[str],                 # length R
-    col_headers: list[str],                 # length C
-    cell_text: dict[tuple[int, int], str],  # keys (r,c) where r in [0..R-1], c in [0..C-1]
-    sizes: dict,
-    style: dict,
-    col_header_rot_z: float = math.radians(45.0),
-    font: bpy.types.VectorFont | None = None,
-) -> tuple[list[float], list[float]]:
-    """
-    Returns (col_widths, row_heights) for a table with:
-      - header row (col_headers) and header col (row_headers)
-      - value region cell_text
-
-    We compute:
-      col_widths[0] for the row-header column
-      col_widths[c+1] for value columns
-      row_heights[0] for the col-header row
-      row_heights[r+1] for value rows
-
-    sizes = {
-      "row_header": 0.25,
-      "col_header": 0.25,
-      "value": 0.22
-    }
-    """
-    R = len(row_headers)
-    C = len(col_headers)
-
-    pad_x = style["pad_x"]
-    pad_y = style["pad_y"]
-    min_w = style["min_w"]
-    min_h = style["min_h"]
-
-    # 0th col is row headers; cols 1..C are value columns
-    col_widths = [min_w] * (C + 1)
-    # 0th row is col headers; rows 1..R are value rows
-    row_heights = [min_h] * (R + 1)
-
-    # --- measure column headers (affects row 0 height and each value column width) ---
-    for c, label in enumerate(col_headers):
-        w, h = measure_text_dimensions(
-            label,
-            sizes["col_header"],
-            rotation_z_rad=col_header_rot_z,
-            font=font,
-        )
-        col_widths[c + 1] = max(col_widths[c + 1], w + pad_x * 2, min_w)
-        row_heights[0] = max(row_heights[0], h + pad_y * 2, min_h)
-
-    # --- measure row headers (affects col 0 width and each value row height) ---
-    for r, label in enumerate(row_headers):
-        w, h = measure_text_dimensions(
-            label,
-            sizes["row_header"],
-            rotation_z_rad=0.0,
-            font=font,
-        )
-        col_widths[0] = max(col_widths[0], w + pad_x * 2, min_w)
-        row_heights[r + 1] = max(row_heights[r + 1], h + pad_y * 2, min_h)
-
-    # --- measure value cells (affects both their row height and column width) ---
-    for (r, c), body in cell_text.items():
-        w, h = measure_text_dimensions(
-            body,
-            sizes["value"],
-            rotation_z_rad=0.0,
-            font=font,
-        )
-        col_widths[c + 1] = max(col_widths[c + 1], w + pad_x * 2, min_w)
-        row_heights[r + 1] = max(row_heights[r + 1], h + pad_y * 2, min_h)
-
-    return col_widths, row_heights
-
-def cumulative_edges(lengths: list[float], gap: float = 0.0) -> list[float]:
-    """
-    For lengths [L0, L1, ...], returns edges [0, e1, e2, ...] where
-    each step adds length + gap.
-
-    edges[i] is the start edge of cell i.
-    edges[i+1] is the end edge of cell i.
-    """
+def cumulative_edges(lengths: List[float], gap: float = 0.0) -> List[float]:
     edges = [0.0]
     cur = 0.0
     for L in lengths:
@@ -477,183 +344,217 @@ def cumulative_edges(lengths: list[float], gap: float = 0.0) -> list[float]:
         cur += float(gap)
     return edges
 
-def cell_center(edges: list[float], i: int) -> float:
+def cell_center(edges: List[float], i: int) -> float:
     return (edges[i] + edges[i + 1]) * 0.5
 
-def total_span(edges: list[float]) -> float:
-    return edges[-1]
-
-def add_cell_plane(
-    parent,
+def compute_table_layout(
     *,
-    cx: float,
-    cy: float,
-    w: float,
-    h: float,
-    mat,
-    name: str,
-):
+    row_headers: List[str],
+    col_headers: List[str],
+    cell_text: Dict[Tuple[int, int], str],
+    size_row: float,
+    size_col: float,
+    size_val: float,
+    pad_x: float,
+    pad_y: float,
+    min_w: float,
+    min_h: float,
+    col_header_rot_z: float,
+) -> Tuple[List[float], List[float]]:
     """
-    Adds a plane of width w and height h centered at (cx,cy).
-    Blender's primitive plane uses a square "size" (half-dimension scaling),
-    so we create unit plane and scale it.
+    Returns col_widths (C+1) and row_heights (R+1), including header row/col.
     """
-    bpy.ops.mesh.primitive_plane_add(size=1.0, location=(cx, cy, 0.0))
-    obj = bpy.context.object
-    obj.name = name
-    obj.parent = parent
+    R = len(row_headers)
+    C = len(col_headers)
 
-    # unit plane is 2x2 when size=1.0? Actually size is radius, so plane ends up 2x2.
-    # scaling by (w/2, h/2) yields final w x h.
-    obj.scale = (w / 2.0, h / 2.0, 1.0)
+    col_widths = [min_w] * (C + 1)
+    row_heights = [min_h] * (R + 1)
 
-    if obj.data.materials:
-        obj.data.materials[0] = mat
-    else:
-        obj.data.materials.append(mat)
+    # Column headers (rotated)
+    for c, label in enumerate(col_headers):
+        w, h = measure_text_dimensions(label, size_col, rot_z=col_header_rot_z)
+        col_widths[c + 1] = max(col_widths[c + 1], w + 2 * pad_x, min_w)
+        row_heights[0] = max(row_heights[0], h + 2 * pad_y, min_h)
 
-    return obj
+    # Row headers
+    for r, label in enumerate(row_headers):
+        w, h = measure_text_dimensions(label, size_row, rot_z=0.0)
+        col_widths[0] = max(col_widths[0], w + 2 * pad_x, min_w)
+        row_heights[r + 1] = max(row_heights[r + 1], h + 2 * pad_y, min_h)
 
-def add_text_object(
-    parent,
-    *,
-    body: str,
-    cx: float,
-    cy: float,
-    z: float,
-    size: float,
-    mat,
-    rot_z: float = 0.0,
-    font: bpy.types.VectorFont | None = None,
-):
-    bpy.ops.object.text_add(location=(cx, cy, z))
-    obj = bpy.context.object
-    obj.parent = parent
+    # Values
+    for (r, c), body in cell_text.items():
+        w, h = measure_text_dimensions(body, size_val, rot_z=0.0)
+        col_widths[c + 1] = max(col_widths[c + 1], w + 2 * pad_x, min_w)
+        row_heights[r + 1] = max(row_heights[r + 1], h + 2 * pad_y, min_h)
 
-    obj.data.body = "" if body is None else str(body)
-    obj.data.size = float(size)
-    obj.data.align_x = "CENTER"
-    obj.data.align_y = "CENTER"
-    obj.rotation_euler = (0.0, 0.0, float(rot_z))
+    return col_widths, row_heights
 
-    if font is not None:
-        obj.data.font = font
-
-    if obj.data.materials:
-        obj.data.materials[0] = mat
-    else:
-        obj.data.materials.append(mat)
-
-    return obj
 
 def build_variable_cell_table(
     *,
-    parent,
-    row_headers: list[str],
-    col_headers: list[str],
-    cell_text: dict[tuple[int, int], str],
-    mats: dict,
-    sizes: dict,
-    style: dict | None = None,
-    col_header_rot_z: float = math.radians(45.0),
-    font: bpy.types.VectorFont | None = None,
-    text_z: float = 0.01,
-):
-    if style is None:
-        style = default_cell_style()
+    collection: bpy.types.Collection,
+    parent: bpy.types.Object,
+    row_headers: List[str],
+    col_headers: List[str],
+    cell_text: Dict[Tuple[int, int], str],
+    mats: Dict[str, bpy.types.Material],
 
-    # 1) compute per-row/per-col sizes
+    palette: Optional[Dict[str, str]] = None,
+    caption: Optional[str] = None,
+
+    origin_xy: Tuple[float, float] = (0.0, 0.0),
+    text_z: float = 0.02,
+    plane_z: float = 0.0,
+    # font sizes
+    size_row: float = 0.35,
+    size_col: float = 0.35,
+    size_val: float = 0.32,
+    # padding + minima
+    pad_x: float = 0.20,
+    pad_y: float = 0.16,
+    min_w: float = 0.90,
+    min_h: float = 0.60,
+    gap_x: float = 0.00,
+    gap_y: float = 0.00,
+    col_header_rot_z: float = math.radians(45.0),
+) -> Dict[str, Any]:
+    
+    if palette:
+        mats = {
+            k: ensure_material(k, hex_to_rgba(v))
+            for k, v in palette.items()
+        }
+
+
+    """
+    Builds:
+      - header row (rotated column headings)
+      - header col (row headings)
+      - value cells
+      - skips upper-left cell entirely
+    Returns layout info including total_w/total_h.
+    """
     col_widths, row_heights = compute_table_layout(
         row_headers=row_headers,
         col_headers=col_headers,
         cell_text=cell_text,
-        sizes=sizes,
-        style=style,
+        size_row=size_row,
+        size_col=size_col,
+        size_val=size_val,
+        pad_x=pad_x,
+        pad_y=pad_y,
+        min_w=min_w,
+        min_h=min_h,
         col_header_rot_z=col_header_rot_z,
-        font=font,
     )
 
-    # 2) compute edges
-    x_edges = cumulative_edges(col_widths, gap=style["gap_x"])
-    y_edges = cumulative_edges(row_heights, gap=style["gap_y"])
+    x_edges = cumulative_edges(col_widths, gap=gap_x)
+    y_edges = cumulative_edges(row_heights, gap=gap_y)
 
-    # We want y increasing upward, but our table rows go downward.
-    # We'll build with y=0 at top edge, then subtract.
-    total_w = total_span(x_edges)
-    total_h = total_span(y_edges)
+    total_w = x_edges[-1]
+    total_h = y_edges[-1]
 
-    # Center table around origin
-    x0 = -total_w / 2.0
-    y0 = +total_h / 2.0
+    if caption:
+        cap_x = origin_xy[0] + pad_x
+        cap_gap = max(0.25, row_heights[0] * 0.25)   # scales with header row
 
-    # 3) planes (skip upper-left)
+        cap_y = origin_xy[1] + row_heights[0] + gap_y + cap_gap
+
+        add_text_object(
+            collection,
+            parent,
+            name="grid_caption",
+            body=caption,
+            location=(cap_x, cap_y, text_z),
+            size=size_row * 1.1,
+            material=mats["row_fg"],
+            rot_z=0.0,
+            align_x="LEFT",
+            align_y="BOTTOM_BASELINE",
+        )
+
+
+    # Place top-left at origin, grow right and down
+    ox, oy = origin_xy
+
+    def world_center(r: int, c: int) -> Tuple[float, float]:
+        cx = ox + cell_center(x_edges, c)
+        cy = oy - cell_center(y_edges, r)
+        return cx, cy
+
     R = len(row_headers)
     C = len(col_headers)
 
-    for r in range(R + 1):       # includes header row 0
-        for c in range(C + 1):   # includes header col 0
+    # Planes (skip r=0,c=0)
+    for r in range(R + 1):
+        for c in range(C + 1):
             if r == 0 and c == 0:
                 continue
 
             w = col_widths[c]
             h = row_heights[r]
-            cx = x0 + cell_center(x_edges, c)
-            cy = y0 - cell_center(y_edges, r)
+            cx, cy = world_center(r, c)
 
             is_header = (r == 0 or c == 0)
             mat = mats["head_bg"] if is_header else mats["cell_bg"]
+
             add_cell_plane(
-                parent,
-                cx=cx, cy=cy,
-                w=w, h=h,
-                mat=mat,
+                collection, parent,
                 name=f"cell_r{r}_c{c}",
+                cx=cx, cy=cy, z=plane_z,
+                w=w, h=h,
+                material=mat,
             )
 
-    # 4) header text
-    # Column headers: row 0, col 1..C
+    # Column header text (r=0,c=1..C)
     for c in range(1, C + 1):
-        cx = x0 + cell_center(x_edges, c)
-        cy = y0 - cell_center(y_edges, 0)
+        cx, cy = world_center(0, c)
         add_text_object(
-            parent,
+            collection, parent,
+            name=f"col_{c}",
             body=col_headers[c - 1],
-            cx=cx, cy=cy, z=text_z,
-            size=sizes["col_header"],
-            mat=mats["col_fg"],
+            location=(cx, cy, text_z),
+            size=size_col,
+            material=mats["col_fg"],
             rot_z=col_header_rot_z,
-            font=font,
+            align_x="LEFT",
+            align_y="BOTTOM",
         )
 
-    # Row headers: col 0, row 1..R
+    # Row header text (c=0,r=1..R)
     for r in range(1, R + 1):
-        cx = x0 + cell_center(x_edges, 0)
-        cy = y0 - cell_center(y_edges, r)
+        cx, cy = world_center(r, 0)
         add_text_object(
-            parent,
+            collection, parent,
+            name=f"row_{r}",
             body=row_headers[r - 1],
-            cx=cx, cy=cy, z=text_z,
-            size=sizes["row_header"],
-            mat=mats["row_fg"],
+            location=(cx, cy, text_z),
+            size=size_row,
+            material=mats["row_fg"],
             rot_z=0.0,
-            font=font,
+            align_x="RIGHT",
+            align_y="CENTER",
         )
 
-    # 5) value text: (r,c) in value region maps to (r+1,c+1) in full grid
+    # Value text (r=1..R,c=1..C)
     for (vr, vc), body in cell_text.items():
         r = vr + 1
         c = vc + 1
-        cx = x0 + cell_center(x_edges, c)
-        cy = y0 - cell_center(y_edges, r)
+        cx, cy = world_center(r, c)
         add_text_object(
-            parent,
+            collection, parent,
+            name=f"val_{r}_{c}",
             body=body,
-            cx=cx, cy=cy, z=text_z,
-            size=sizes["value"],
-            mat=mats["val_fg"],
+            location=(cx, cy, text_z),
+            size=size_val,
+            material=mats["val_fg"],
             rot_z=0.0,
-            font=font,
+            align_x="LEFT",
+            align_y="CENTER",
         )
+
+    _depsgraph_update()
 
     return {
         "col_widths": col_widths,
@@ -665,67 +566,129 @@ def build_variable_cell_table(
     }
 
 
+# -------------------------
+# Camera + output
+# -------------------------
 
-# ------------------------------------------------------------
-# World / Camera / Output
-# ------------------------------------------------------------
+def ensure_camera_ortho(span_w: float, span_h: float, *, margin: float = 0.8) -> bpy.types.Object:
+    scene = bpy.context.scene
+    cam = next((o for o in scene.objects if o.type == "CAMERA"), None)
 
-def setup_world():
-    world = bpy.data.worlds.get("World") or bpy.data.worlds.new("World")
-    bpy.context.scene.world = world
-    world.use_nodes = True
-    bg = world.node_tree.nodes.get("Background")
-    if bg:
-        bg.inputs["Color"].default_value = (1, 1, 1, 1)
-        bg.inputs["Strength"].default_value = 1.0
+    if cam is None:
+        cam_data = bpy.data.cameras.new("Camera")
+        cam = bpy.data.objects.new("Camera", cam_data)
+        scene.collection.objects.link(cam)
 
+    cam.data.type = "ORTHO"
+    cam.data.ortho_scale = max(span_w, span_h) + margin
 
-def setup_camera(span: float):
-    bpy.ops.object.camera_add()
-    cam = bpy.context.object
-    cam.location = (0.0, 0.0, span * 1.5)
+    # Place camera looking down -Z
+    cam.location = (span_w * 0.5, -span_h * 0.5, 15.0)
     cam.rotation_euler = (0.0, 0.0, 0.0)
-    bpy.context.scene.camera = cam
 
+    scene.camera = cam
+    return cam
 
-def save_blend(path: str):
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    if not path.lower().endswith(".blend"):
-        path += ".blend"
-    bpy.ops.wm.save_as_mainfile(filepath=path)
-    log(f"[AA_RENDER] Saved {path}")
+def write_output(out_path: str) -> None:
+    scene = bpy.context.scene
+    p = Path(out_path)
+    ext = p.suffix.lower()
 
+    if ext == ".blend":
+        bpy.ops.wm.save_as_mainfile(filepath=str(p))
+        return
+
+    if ext in (".png", ".jpg", ".jpeg"):
+        scene.render.filepath = str(p)
+        scene.render.image_settings.file_format = "PNG" if ext == ".png" else "JPEG"
+        bpy.ops.render.render(write_still=True)
+        return
+
+    # Default: save .blend if unknown
+    bpy.ops.wm.save_as_mainfile(filepath=str(p.with_suffix(".blend")))
+
+def load_caption(path: Optional[str]) -> Optional[str]:
+    if not path:
+        return None
+    data = json.loads(Path(path).read_text())
+    if isinstance(data, str):
+        return data
+    if isinstance(data, dict):
+        return data.get("caption")
+    raise ValueError("caption JSON must be a string or an object with a 'caption' field.")
+
+def load_palette(path: Optional[str]) -> Optional[Dict[str, str]]:
+    if not path:
+        return None
+    data = json.loads(Path(path).read_text())
+    if not isinstance(data, dict):
+        raise ValueError("palette JSON must be an object mapping material keys to hex strings.")
+    return data
+
+# -------------------------
+# Main
+# -------------------------
+
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--aa", required=True, help="Path to AA JSON (dense or triples).")
+    ap.add_argument("--caption-json", default=None, help="Path to caption JSON file")
+    ap.add_argument("--palette-json", default=None, help="Path to palette JSON file")
+    ap.add_argument("--out", required=True, help="Output .blend or .png/.jpg")
+
+    ap.add_argument("--layout", default="row-major", choices=["row-major", "col-major"],
+                    help="Dense vals flattening order.")
+    ap.add_argument("--keep-empty", action="store_true", help="Keep empty cells as triples.")
+    ap.add_argument("--aggregate", default="last", choices=["last", "first", "stack"],
+                    help="If duplicate (row,col) pairs exist, how to combine.")
+    ap.add_argument("--no-clear", action="store_true", help="Do not factory-reset the scene.")
+    return ap.parse_args(argv)
 
 def main():
-    log("[AA_RENDER] starting")
+    argv = None
+    # Blender passes args after "--"
+    if "--" in sys.argv:
+        argv = sys.argv[sys.argv.index("--") + 1:]
 
-    aa_path, out_path = parse_args()
-
-    clear_scene()
-    setup_world()
-
-    mats = ensure_five_materials()
-    sizes = {
-    "row_header": 0.25,
-    "col_header": 0.25,
-    "value": 0.22,
-    }
-
-    aa = load_aa(aa_path)
+    args = parse_args(argv)
     
+    caption = load_caption(args.caption_json)
+    print("caption=", caption)
+    palette = load_palette(args.palette_json)
+    print("palette=", palette)
+   
+    if not args.no_clear:
+        clear_scene_aggressive()
+
+    aa = json.loads(Path(args.aa).read_text())
+
+    triples = aa_to_triples(aa, layout=args.layout, keep_empty=args.keep_empty)
+    row_headers, col_headers, cell_text = triples_to_headers_and_cells(triples, aggregate=args.aggregate)
+
+    mats = ensure_aa_materials()
+    col = ensure_collection("AA_TABLE")
+    parent = new_empty("AA_table", col)
+
+    # Build the grid. origin_xy is top-left corner of the table
     layout_info = build_variable_cell_table(
-        parent=parent_empty,
+        collection=col,
+        parent=parent,
         row_headers=row_headers,
         col_headers=col_headers,
         cell_text=cell_text,
         mats=mats,
-        sizes=sizes,
+        caption=caption,
+        palette=palette,
+        origin_xy=(0.0, 0.0),
+        col_header_rot_z=math.radians(45.0),
+        gap_x=0.05,
+        gap_y=0.05,
     )
-    span = build_table_from_triples(aa, mats)
-    setup_camera(span)
-    save_blend(out_path)
 
-    log("[AA_RENDER] done")
+    # Camera framing
+    ensure_camera_ortho(layout_info["total_w"], layout_info["total_h"])
+
+    write_output(args.out)
 
 
 if __name__ == "__main__":

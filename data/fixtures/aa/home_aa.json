@@ -1,0 +1,19 @@
+{
+  "schema": "AA_JSON",
+  "version": 1,
+  "rows": [
+    "001"
+  ],
+  "cols": [
+    "Encounter.priority.coding[0].system",
+    "Encounter.priority.coding[0].code",
+    "Encounter.priority.coding[0].display",
+    "Encounter.priority.text"
+  ],
+  "vals": [
+    "http://example.org/fhir/CodeSystem/encounter-priority",
+    "STAT",
+    "Stat (immediate attention)",
+    "Stat"
+  ]
+}

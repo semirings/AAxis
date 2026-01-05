@@ -15,7 +15,9 @@ if [[ $# -lt 2 ]]; then
 fi
 
 AA_JSON="$1"
-OUT_PATH="$2"
+CAPTION="$2"
+PALETTE="$3"
+OUT_PATH="$4"
 
 # ---- sanity checks ----
 [[ -x "$BLENDER_BIN" ]] || { echo "Blender not found/executable: $BLENDER_BIN"; exit 1; }
@@ -28,6 +30,8 @@ mkdir -p "$OUT_DIR"
 
 echo "Rendering AA:"
 echo "  AA_JSON : $AA_JSON"
+echo "  CAPTION : $CAPTION"
+echo "  PALETTE : $PALETTE"
 echo "  Output  : $OUT_PATH"
 echo "  Blender : $BLENDER_BIN"
 echo "  Script  : $BLENDER_SCRIPT"
@@ -39,4 +43,6 @@ echo "  Script  : $BLENDER_SCRIPT"
   -P "$BLENDER_SCRIPT" \
   -- \
   --aa "$AA_JSON" \
+  --caption-json "$CAPTION" \
+  --palette-json "$PALETTE" \
   --out "$OUT_PATH"

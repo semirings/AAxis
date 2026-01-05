@@ -1,0 +1,19 @@
+{
+  "schema": "AA_JSON",
+  "version": 1,
+  "rows": [
+    "Encounter/enc-q1-001"
+  ],
+  "cols": [
+    "Encounter.priority.coding[0].system",
+    "Encounter.priority.coding[0].code",
+    "Encounter.priority.coding[0].display",
+    "Encounter.priority.text"
+  ],
+  "vals": [
+    "http://terminology.hl7.org/CodeSystem/v3-ActPriority",
+    "UR",
+    "urgent",
+    "Urgent"
+  ]
+}

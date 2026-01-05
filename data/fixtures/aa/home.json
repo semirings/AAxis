@@ -1,0 +1,28 @@
+{
+  "resourceType": "Encounter",
+  "id": "enc-home-001",
+  "meta": {
+    "profile": [
+      "http://example.org/fhir/StructureDefinition/home-encounter"
+    ]
+  },
+  "status": "in-progress",
+  "class": {
+    "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+    "code": "AMB",
+    "display": "ambulatory"
+  },
+  "priority": {
+    "coding": [
+      {
+        "system": "http://example.org/fhir/CodeSystem/encounter-priority",
+        "code": "STAT",
+        "display": "Stat (immediate attention)"
+      }
+    ],
+    "text": "Stat"
+  },
+  "subject": {
+    "reference": "Patient/pat-001"
+  }
+}
