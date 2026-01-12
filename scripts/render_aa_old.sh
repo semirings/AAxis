@@ -6,7 +6,7 @@ BLENDER_BIN="/Applications/Blender.app/Contents/MacOS/Blender"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-BLENDER_SCRIPT="$PROJECT_ROOT/scripts/aa_render_grid.py"
+BLENDER_SCRIPT="$PROJECT_ROOT/scripts/grid_node_group.py"
 
 # ---- arguments ----
 if [[ $# -lt 2 ]]; then
