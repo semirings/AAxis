@@ -1,0 +1,5 @@
+{
+  "resourceType": "Practitioner",
+  "id": "prOrder",
+  "name": [{ "text": "Ordering Clinician" }]
+}

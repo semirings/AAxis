@@ -1,0 +1,11 @@
+{
+  "resourceType": "Observation",
+  "id": "oB",
+  "status": "final",
+  "subject": { "reference": "Patient/p1" },
+  "encounter": { "reference": "Encounter/e1" },
+  "specimen": { "reference": "Specimen/s1" },
+  "performer": [
+    { "reference": "Practitioner/prLab" }
+  ]
+}

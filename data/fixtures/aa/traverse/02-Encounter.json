@@ -1,0 +1,5 @@
+{
+  "resourceType": "Encounter",
+  "id": "e1",
+  "subject": { "reference": "Patient/p1" }
+}

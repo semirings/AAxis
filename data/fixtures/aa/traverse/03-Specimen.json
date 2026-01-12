@@ -1,0 +1,5 @@
+{
+  "resourceType": "Specimen",
+  "id": "s1",
+  "subject": { "reference": "Patient/p1" }
+}

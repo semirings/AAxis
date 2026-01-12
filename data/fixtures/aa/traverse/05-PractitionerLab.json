@@ -1,0 +1,5 @@
+{
+  "resourceType": "Practitioner",
+  "id": "prLab",
+  "name": [{ "text": "Lab Technician" }]
+}
