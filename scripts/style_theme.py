@@ -3,29 +3,50 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Dict, Tuple, Optional
+from pathlib import Path
 
+Color = Tuple[float, float, float, float]  # RGBA 0..1\
 
-Color = Tuple[float, float, float, float]  # RGBA 0..1
+@staticmethod
+def hex_to_rgba(hex_color: str, alpha: float = 1.0):
+    """
+    Convert a hex color (#RRGGBB or RRGGBB) to a Blender RGBA tuple (0–1 floats).
+    """
+    hex_color = hex_color.strip().lstrip("#")
 
+    if len(hex_color) != 6:
+        raise ValueError(f"Invalid hex color: {hex_color}")
 
+    r = int(hex_color[0:2], 16) / 255.0
+    g = int(hex_color[2:4], 16) / 255.0
+    b = int(hex_color[4:6], 16) / 255.0
+
+    return (r, g, b, alpha)
 @dataclass(frozen=True)
 class Theme:
     # Fonts
-    font_main_path: Optional[str] = None
-    font_mono_path: Optional[str] = None
+    font_main_path: Optional[str] = str(
+        Path("/Users/gcr/Vignettes/BlenderShared/Fonts/Graphik-Font-Family/GraphikRegular.otf")
+    )
+    font_mono_path: Optional[str] = str(
+        Path("/Users/gcr/Vignettes/BlenderShared/Fonts/Roboto_Slab/static/RobotoSlab-Regular.ttf")
+    )
 
     # Base palette
-    bg: Color = (0.06, 0.06, 0.07, 1.0)
-    grid_inactive: Color = (0.25, 0.25, 0.27, 1.0)
-    grid_active: Color = (0.15, 0.80, 0.90, 1.0)  # cyan-ish highlight
+
+    bg: Color = hex_to_rgba("#4F5F77")
+    fg: Color = hex_to_rgba("#FFFFFF")
+    title: Color = hex_to_rgba("#DB3B26")
+    grid_inactive: Color = hex_to_rgba("#6F6F6F")
+    grid_active: Color = hex_to_rgba("#FFFFFF")  # cyan-ish highlight
     grid_previous: Color = (0.12, 0.45, 0.50, 1.0)
 
     # Resource type accents (optional chips/labels)
     type_colors: Dict[str, Color] = None  # filled in __post_init__ below
 
     # Card styling
-    card_bg: Color = (0.06, 0.06, 0.07, 0.75)
-    card_text: Color = (0.95, 0.95, 0.96, 1.0)
+    card_bg: Color = hex_to_rgba("#F4F0AC")
+    card_text: Color = hex_to_rgba("#000000")
     card_padding: float = 0.10
     card_text_size: float = 0.35  # Blender font size units vary by scene scale
 
@@ -42,5 +63,5 @@ class Theme:
                 "Specimen": (0.95, 0.90, 0.25, 1.0),
             })
 
-
 DEFAULT_THEME = Theme()
+print("style_theme loaded, DEFAULT_THEME:", DEFAULT_THEME.bg)
