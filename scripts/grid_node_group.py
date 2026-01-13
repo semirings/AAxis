@@ -1,5 +1,9 @@
 import bpy
 
+def ensure_aa_grid_gn(name: str = "AA_Grid_GN"):
+    """Ensure the AA_Grid_GN node group exists and return it."""
+    return make_grid_node_group(name)
+
 def ensure_geometry_nodes_modifier(obj, node_group):
     """Add a Geometry Nodes modifier (or reuse one) and assign the node group."""
     mod = None
@@ -118,5 +122,9 @@ def main():
         pass
 
     print("Created Geometry Nodes grid node group and attached it to:", obj.name)
+    bpy.ops.wm.save_mainfile()
+    print("blend saved...")
+    
+if __name__ == "__main__":
+    main()
 
-main()

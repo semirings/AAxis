@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import bpy
-
+from pathlib import Path
 
 def remove_collection_recursive(col: bpy.types.Collection) -> None:
     """
@@ -72,3 +72,89 @@ def purge_orphans(recursive: bool = True, passes: int = 5) -> None:
             bpy.ops.outliner.orphans_purge(do_recursive=recursive)
         except Exception:
             break
+
+def ensure_collection(name: str, parent: bpy.types.Collection | None = None) -> bpy.types.Collection:
+    """
+    Ensure a Collection with `name` exists and is linked under `parent` (or the scene root).
+    Returns the collection.
+    """
+    col = bpy.data.collections.get(name)
+    if col is None:
+        col = bpy.data.collections.new(name)
+
+    # Decide where it should be linked
+    if parent is None:
+        parent = bpy.context.scene.collection
+
+    # Link if not already linked under parent
+    if col.name not in parent.children:
+        parent.children.link(col)
+
+    return col
+
+def ensure_object_linked(obj: bpy.types.Object, collection: bpy.types.Collection | None = None) -> None:
+    """
+    Ensure `obj` is linked to `collection` (or the active scene root collection if None).
+    Safe to call repeatedly.
+    """
+    if obj is None:
+        return
+
+    if collection is None:
+        collection = bpy.context.scene.collection
+
+    # If already linked to that collection, nothing to do
+    if obj.name in collection.objects:
+        return
+
+    # Link it
+    collection.objects.link(obj)
+
+def ensure_material(
+    name: str,
+    use_nodes: bool = True,
+) -> bpy.types.Material:
+    """
+    Ensure a Material with `name` exists. Optionally enables nodes.
+    Returns the material.
+    """
+    mat = bpy.data.materials.get(name)
+    if mat is None:
+        mat = bpy.data.materials.new(name=name)
+
+    if use_nodes and not mat.use_nodes:
+        mat.use_nodes = True
+
+    return mat
+
+def ensure_font(font_path: str | Path) -> bpy.types.VectorFont:
+    """
+    Ensure a VectorFont datablock is loaded from `font_path`.
+    Returns the loaded font datablock.
+
+    `font_path` should be a .ttf/.otf file on disk.
+    """
+    p = Path(font_path).expanduser().resolve()
+    if not p.exists():
+        raise FileNotFoundError(f"Font file not found: {p}")
+
+    # If already loaded, reuse it
+    for f in bpy.data.fonts:
+        try:
+            if Path(bpy.path.abspath(f.filepath)).resolve() == p:
+                return f
+        except Exception:
+            pass
+
+    # Load new font datablock
+    return bpy.data.fonts.load(str(p))
+
+def frame_range_set(start: int, end: int, *, current: int | None = None) -> None:
+    """
+    Set scene frame start/end (and optionally current frame).
+    """
+    scene = bpy.context.scene
+    scene.frame_start = int(start)
+    scene.frame_end = int(end)
+    if current is not None:
+        scene.frame_set(int(current))

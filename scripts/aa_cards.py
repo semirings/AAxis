@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import sys
 import bpy
 import argparse
 import json
 from typing import Dict, List, Tuple, Optional
+from pathlib import Path
 
+# Make /Users/gcr/ingis.Wk/AAxis/scripts importable when run via Blender --python
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 from util_blender import ensure_collection, ensure_object_linked, ensure_material
 from style_theme import DEFAULT_THEME, Theme
-
 
 def _make_card_plane(name: str, w: float, h: float) -> bpy.types.Object:
     bpy.ops.mesh.primitive_plane_add(size=1.0, enter_editmode=False, align='WORLD')
@@ -65,7 +70,7 @@ def create_card(
 
     ensure_object_linked(plane, col)
     ensure_object_linked(txt, col)
-
+    print("Card created")
     return plane, txt
 
 
@@ -158,11 +163,12 @@ def _parse_args(argv=None):
 
 def main():
     argv = []
-    if "--" in bpy.app.argv:
-        argv = bpy.app.argv[bpy.app.argv.index("--")+1:]
+    if "--" in sys.argv:
+        argv = sys.argv[sys.argv.index("--") + 1:]
     args = _parse_args(argv)
     build_cards_from_spec(args.traversal_json, start_frame=args.start_frame, frames_per_step=args.frames_per_step)
-
+    bpy.ops.wm.save_mainfile()
+    print("blend saved...")
 
 if __name__ == "__main__":
     main()

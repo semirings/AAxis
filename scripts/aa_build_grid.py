@@ -70,7 +70,8 @@ def main():
         argv = bpy.app.argv[bpy.app.argv.index("--")+1:]
     args = _parse_args(argv)
     build_grid_plane(size_x=args.size_x, size_y=args.size_y, gn_group_name=args.gn_group)
-
+    bpy.ops.wm.save_mainfile()
+    print("blend saved...")
 
 if __name__ == "__main__":
     main()

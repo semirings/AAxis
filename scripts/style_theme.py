@@ -56,11 +56,11 @@ class Theme:
     def __post_init__(self):
         if self.type_colors is None:
             object.__setattr__(self, "type_colors", {
-                "Patient": (0.20, 0.55, 0.95, 1.0),
-                "Encounter": (0.30, 0.85, 0.45, 1.0),
-                "Observation": (0.95, 0.60, 0.20, 1.0),
-                "Practitioner": (0.85, 0.30, 0.85, 1.0),
-                "Specimen": (0.95, 0.90, 0.25, 1.0),
+                "Patient": hex_to_rgba("#FAE232"),
+                "Encounter": hex_to_rgba("#EF5FA7"),
+                "Observation": hex_to_rgba("#FFFFFF"),
+                "Practitioner": hex_to_rgba("#FF9301"),
+                "Specimen": hex_to_rgba("#A9A9A9"),
             })
 
 DEFAULT_THEME = Theme()
