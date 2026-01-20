@@ -2,7 +2,7 @@
 
 #
 # How to run:
-# python bundle_to_aa.py synthea_patient_bundle.json -o synthea_patient_bundle.aa.json
+# scripts/synth2aa.py  -o /Users/gcr/ingis.Wk/FHIRSDS/aa-bundles/Adam631_Buckridge80_2f3fd555-23e0-adae-ccb8-438dca7e7304.json /Users/gcr/ingis.Wk/FHIRSDS/bundles/Adam631_Buckridge80_2f3fd555-23e0-adae-ccb8-438dca7e7304.json
 #
 
 from __future__ import annotations
@@ -11,8 +11,9 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Set, Optional
 
-EMPTY = ""
+print("Start==>")
 
+EMPTY = ""
 
 def res_id(res: Dict[str, Any]) -> Optional[str]:
     rt = res.get("resourceType")
