@@ -10,7 +10,6 @@
 # Generated Blender outputs
 /blender/out/
 /renders/
-*.blend
 
 # --------------------
 # Media outputs
